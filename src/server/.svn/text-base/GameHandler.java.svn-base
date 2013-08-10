@@ -1,0 +1,330 @@
+package server;
+
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.net.Socket;
+import java.util.ArrayList;
+import java.util.Random;
+
+
+/**
+ * GameHandler based on the thread class.
+ * It keeps track of the players game until it ends.
+ * 
+ * @author Alberto Lorente and Fernando Garcia
+ */
+public class GameHandler
+   extends Thread
+{
+   private final boolean DEBUG;
+   
+   private Socket gameSocket;
+   private ArrayList<String> dictionary;
+   private String word = null;
+   private String codedWord = null;
+   private static final int MAX_FAIL_ATTEMPT = 10;
+   private int attempts = 0;
+   private int score = 0;
+   private boolean nextGame = true;
+   private boolean gameStart = false;
+   private String eol = System.getProperty("line.separator");
+
+
+   /**
+    * Constructor for the gameHandler, it acts upon a socket to listen and
+    * a dictionary to search the game words.
+    * @param gameSocket - the socket to keep track of the game.
+    * @param dictionary - the list of words for the game.
+    * @param d - Debug?
+    */
+   public GameHandler(Socket gameSocket, ArrayList<String> dictionary, boolean d)
+   {
+      this.gameSocket = gameSocket;
+      this.dictionary = dictionary;
+      this.DEBUG = d;
+   }
+
+
+   /**
+    * Main game logic.
+    */
+   @Override
+   public void run()
+   {
+      BufferedReader rd = null;
+      BufferedWriter wout = null;
+      try
+      {
+         rd = new BufferedReader(new InputStreamReader(gameSocket.getInputStream()));
+         
+         try
+         {
+            wout = new BufferedWriter(new OutputStreamWriter(gameSocket.getOutputStream()));
+         }
+         catch (IOException ex)
+         {
+            System.err.println(gameSocket.getInetAddress() + 
+                            " Error when creating a writer over the socket.");
+         }
+      }
+      catch (IOException ex)
+      {
+         System.err.println(gameSocket.getInetAddress() + 
+                            " Error when creating a reader over the socket.");
+      }
+      
+      if (rd != null && wout != null)
+      {
+         while (nextGame)
+         {
+            //StartGame, Setup
+            word = selectWord(dictionary);
+            codedWord = generateDashWord(word);
+            attempts = MAX_FAIL_ATTEMPT;
+            
+            try
+            {
+               String line = rd.readLine();
+               if (line != null && line.equals("STARTGAME"))
+               {
+                  //game starts now, sends selected word with attempts and 
+                  //number of letters
+                  gameStart = true;
+                  String tuple = codedWord + "," + MAX_FAIL_ATTEMPT + eol;
+                  wout.write(tuple);
+                  wout.flush();
+                  
+                  if (DEBUG)
+                  {
+                     System.out.println(gameSocket.getInetAddress() + 
+                                        " STARTGAME received and reply sent.");
+                  }
+               }
+            }
+            catch (IOException ex)
+            {
+               System.err.println(gameSocket.getInetAddress() + 
+                                  " Error while reading or writing from or to the stream.");
+            }
+
+            //game loop, waiting for letters or words and conditions for 
+            //winning or losing
+            while (gameStart)
+            {
+               if (DEBUG)
+               {
+                  System.out.println(gameSocket.getInetAddress() + 
+                                     " Waiting for request...");
+               }
+               
+               try
+               {
+                  String line = rd.readLine();
+                  if (line == null)
+                  {
+                     gameStart = false;
+                     nextGame = false;
+                  }
+                  else
+                  {
+                     String data = line.toUpperCase();
+                     String[] list = data.split(",");
+
+                     if (list[0].equals("LETTER"))
+                     {
+                        String guess = list[1];
+                        if (word.contains(guess))
+                        {
+                           //resend the word which is rebuild step by step
+                           codedWord = wordRebuilder(codedWord, word, guess);
+                           if (!(codedWord.equals(word)))
+                           {
+                              //retry message
+                              wout.write(codedWord + "," + attempts + eol);
+                              wout.flush();
+                           }
+                           else
+                           {
+                              score++;
+                              //winner message
+                              wout.write("WINNER," + score + "," + word + eol);
+                              wout.flush();
+                           }
+                        }
+                        else
+                        {
+                           attempts--;
+
+                           if (attempts > 0)
+                           {
+                              //try again message
+                              wout.write(codedWord + "," + attempts + eol);
+                              wout.flush();
+                           }
+                           else
+                           {
+                              attempts = 0;
+                              score--;
+
+                              //gameover message
+                              wout.write("GAMEOVER," + attempts + "," + score + ","
+                                         + word + eol);
+                              wout.flush();
+                           }
+                        }
+
+                        if (DEBUG)
+                        {
+                           System.out.println(gameSocket.getInetAddress()
+                                              + " LETTER received and reply sent.");
+                        }
+                     }
+                     //Check if the word submitted is the good one
+                     else if (list[0].equals("WORD"))
+                     {
+                        String guess = list[1];
+                        if (word.equals(guess))
+                        {
+                           score++;
+
+                           //winner message
+                           wout.write("WINNER," + score + "," + word + eol);
+                           wout.flush();
+                        }
+                        else
+                        {
+                           attempts--;
+                           if (attempts > 0)
+                           {
+                              //try again message
+                              wout.write(codedWord + "," + attempts + eol);
+                              wout.flush();
+                           }
+                           else
+                           {
+                              attempts = 0;
+                              score--;
+
+                              //gameover message
+                              wout.write("GAMEOVER," + attempts + "," + score + ","
+                                         + word + eol);
+                              wout.flush();
+                           }
+                        }
+
+                        if (DEBUG)
+                        {
+                           System.out.println(gameSocket.getInetAddress()
+                                              + " WORD received and reply sent.");
+                        }
+                     }
+                     //User asks for NextGame
+                     else if (list[0].equals("NEXTGAME"))
+                     {
+                        gameStart = false;
+
+                        if (DEBUG)
+                        {
+                           System.out.println(gameSocket.getInetAddress()
+                                              + " NEXTGAME received.");
+                        }
+                     }
+                     //User asks to EndGame
+                     else if (list[0].equals("ENDGAME"))
+                     {
+                        gameStart = false;
+                        nextGame = false;
+
+                        if (DEBUG)
+                        {
+                           System.out.println(gameSocket.getInetAddress()
+                                              + " ENDGAME received.");
+                        }
+                     }
+                  }
+               }
+               catch (IOException ex)
+               {
+                  System.err.println(gameSocket.getInetAddress() + 
+                                     " Error reading or writing from or to the stream.");
+                  gameStart = false;
+                  nextGame = false;
+               }
+            }
+         }
+         
+         try
+         {
+            if (DEBUG)
+            {
+               System.out.println(gameSocket.getInetAddress() + " Closing connection.");
+            }
+            
+            rd.close();
+            wout.close();
+            gameSocket.close();
+         }
+         catch (IOException ex)
+         {
+            System.err.println(gameSocket.getInetAddress() + 
+                               " Error closing the socket.");
+         }
+      }
+   }
+
+
+   /**
+    * Method that selects a random word from a dictionary.
+    * 
+    * @param dictionary - arraylist to select word from
+    * @return word for the game
+    */
+   private String selectWord(ArrayList<String> dictionary)
+   {
+      Random generator = new Random(System.currentTimeMillis());
+      return dictionary.get(generator.nextInt(dictionary.size()));
+   }
+
+
+   /**
+    * Method to generate a codified word with dashes only.
+    * 
+    * @param word - the word to be codified
+    * @return codified word
+    */
+   private String generateDashWord(String word)
+   {
+      return word.replaceAll("[a-zA-Z]", "-");
+   }
+
+
+   /**
+    * Method in charge to rebuild the codified word upon the guesses made by
+    * the player of the game.
+    * 
+    * @param codedWord - the actual game word codified until now
+    * @param realWord - the real word which was used to codify.
+    * @param guess - the letter guessed by the user in order to rebuild
+    * @return partially decodified or complete word
+    */
+   private String wordRebuilder(String codedWord, String realWord, String guess)
+   {
+      char[] coded = codedWord.toCharArray();
+      char[] real = realWord.toCharArray();
+      char search = guess.charAt(0);
+      int len = realWord.length();
+
+      for (int i = 0; i < len; i++)
+      {
+         if (real[i] == search)
+         {
+            coded[i] = search;
+         }
+      }
+
+      return new String(coded);
+   }
+}
